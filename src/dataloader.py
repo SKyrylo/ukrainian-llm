@@ -1,8 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from tokenizer import BPETokenizer
-
 
 class CustomDataset(Dataset):
     def __init__(
@@ -23,8 +21,8 @@ class CustomDataset(Dataset):
             input_chunk = token_ids[i:i+max_length]
             target_chunk = token_ids[i+1:i+max_length+1]
 
-            self.input_ids.append(torch.tensor(input_chunk))
-            self.target_ids.append(torch.tensor(target_chunk))
+            self.input_ids.append(input_chunk.clone())
+            self.target_ids.append(target_chunk.clone())
 
     def __len__(self):
         return len(self.input_ids)
@@ -35,18 +33,16 @@ class CustomDataset(Dataset):
 
 def create_dataloader(
     txt,
+    tokenizer,
     batch_size=4,
-    max_length=256,
+    context_length=256,
     stride=128,
     shuffle=True,
     drop_last=True,
     num_workers=0
     ):
-    # Initialize the tokenizer
-    tokenizer = BPETokenizer("dataset/tokenizer.json")
-
     # Create the dataset
-    dataset = CustomDataset(txt, tokenizer, max_length, stride)
+    dataset = CustomDataset(txt, tokenizer, context_length, stride)
 
     # Create the dataloader
     dataloader = DataLoader(
@@ -61,16 +57,20 @@ def create_dataloader(
 
 
 if __name__ == "__main__":
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.tokenizer import BPETokenizer
+
     with open("dataset/The_Verdict.txt") as f:
         raw_text = f.read()
     
-    dataloader = create_dataloader(raw_text, batch_size=1, max_length=4, stride=1, shuffle=False)
+    tokenizer = BPETokenizer("dataset/tokenizer.json")
+    dataloader = create_dataloader(raw_text, tokenizer, batch_size=8, max_length=4, stride=4, shuffle=False)
 
     data_iter = iter(dataloader)
-    first_batch = next(data_iter)
-    print(first_batch)
-
-    tokenizer = BPETokenizer("dataset/tokenizer.json")
+    inputs, targets = next(data_iter)
+    print(f"Token IDs: {inputs}")
+    print(f"Input shape: {inputs.shape}")
     
-    print(tokenizer.decode(first_batch[0]))
-    print(tokenizer.decode(first_batch[1]))
+    print(tokenizer.decode(inputs))

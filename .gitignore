@@ -2,3 +2,7 @@
 __pycache__/
 
 dataset/*.json
+models/*.pth
+
+loss-plot.pdf
+.vscode/
