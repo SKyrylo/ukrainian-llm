@@ -175,62 +175,97 @@ def train_model(
     start_context,
     tokenizer,
     temperature=0.0,
-    top_k=None
+    top_k=None,
+    patience=3,
+    save_best_path=None,
     ):
-    # Initialize lists to track losses and tokens seen
+    """Train the model with optional early stopping and best-model checkpointing.
+
+    Args:
+        patience:        Stop if val_loss has not improved for this many consecutive
+                         evaluation steps. Set to 0 to disable early stopping.
+        save_best_path:  If given, save the model state whenever val_loss improves.
+                         Pass the same path as model_save_path to always keep the best
+                         checkpoint on disk (safe for overnight runs).
+    """
     train_losses, val_losses, track_tokens_seen = [], [], []
     tokens_seen, global_step = 0, -1
+    best_val_loss = float("inf")
+    patience_counter = 0
+    stop_training = False
 
-    # Main training loop
     for epoch in range(num_epochs):
-        model.train()  # Set model to training mode
+        model.train()
 
         for input_batch, target_batch in train_loader:
-            optimizer.zero_grad()  # Reset loss gradients from previous batch iteration
+            optimizer.zero_grad()
             loss = calc_loss_batch(input_batch, target_batch, model, device)
-            loss.backward()  # Compute gradients
-            optimizer.step()  # Update model weights
-            tokens_seen += input_batch.numel()  # Returns the total numer of elements
+            loss.backward()
+            optimizer.step()
+            tokens_seen += input_batch.numel()
             global_step += 1
 
-            # Optional evaluation step
             if global_step % eval_freq == 0:
                 train_loss, val_loss = evaluate_model(
-                    model,
-                    train_loader,
-                    val_loader,
-                    device,
-                    eval_iter
+                    model, train_loader, val_loader, device, eval_iter
                 )
                 train_losses.append(train_loss)
                 val_losses.append(val_loss)
                 track_tokens_seen.append(tokens_seen)
-                print(f"Epoch {epoch+1}/{num_epochs}, Step {global_step}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-            
-        # Print a sample text after each epoch
+                print(
+                    f"Epoch {epoch+1}/{num_epochs}, Step {global_step}, "
+                    f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}"
+                )
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    if save_best_path:
+                        import torch, os
+                        from pathlib import Path
+                        os.makedirs(Path(save_best_path).parent, exist_ok=True)
+                        torch.save(
+                            {
+                                "model_state_dict": model.state_dict(),
+                                "optimizer_state_dict": optimizer.state_dict(),
+                            },
+                            save_best_path,
+                        )
+                        print(f"  ✓ New best val_loss={best_val_loss:.4f} — checkpoint saved.")
+                else:
+                    patience_counter += 1
+                    if patience > 0 and patience_counter >= patience:
+                        print(
+                            f"Early stopping: val_loss has not improved for "
+                            f"{patience} eval steps (best={best_val_loss:.4f})."
+                        )
+                        stop_training = True
+                        break
+
         generate_and_print_sample(model, tokenizer, device, start_context, temperature, top_k)
-    
+
+        if stop_training:
+            break
+
     return train_losses, val_losses, track_tokens_seen
 
 
-def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses, save_path="loss-plot.pdf"):
     fig, ax1 = plt.subplots(figsize=(5, 3))
 
-    # Plot training and validation loss against epochs
     ax1.plot(epochs_seen, train_losses, label="Training loss")
     ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
     ax1.set_xlabel("Epochs")
     ax1.set_ylabel("Loss")
     ax1.legend(loc="upper right")
-    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))  # only show integer labels on x-axis
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-    # Create a second x-axis for tokens seen
-    ax2 = ax1.twiny()  # Create a second x-axis that shares the same y-axis
-    ax2.plot(tokens_seen, train_losses, alpha=0)  # Invisible plot for aligning ticks
+    ax2 = ax1.twiny()
+    ax2.plot(tokens_seen, train_losses, alpha=0)
     ax2.set_xlabel("Tokens seen")
-    
-    fig.tight_layout()  # Adjust layout to make room
-    plt.savefig("loss-plot.pdf")
+
+    fig.tight_layout()
+    plt.savefig(save_path)
     plt.show()
 
 

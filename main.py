@@ -24,22 +24,79 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _resolve_output_dir(config) -> Path | None:
+    """Return the resolved output directory (and create it), or None when
+    output_dir is not set.
+
+    When using Google Drive on Colab, mount the drive BEFORE running this
+    script by adding a cell at the top of your notebook:
+        from google.colab import drive
+        drive.mount('/content/drive')
+    Then set output_dir in config.yaml to e.g. /content/drive/MyDrive/llm
+    """
+    raw = getattr(config, "output_dir", "") or ""
+    if not raw:
+        return None
+
+    out = Path(raw)
+    if str(out).startswith("/content/drive") and not Path("/content/drive/MyDrive").exists():
+        raise RuntimeError(
+            "output_dir points to Google Drive but Drive is not mounted.\n"
+            "Run this in a Colab notebook cell first:\n"
+            "    from google.colab import drive\n"
+            "    drive.mount('/content/drive')"
+        )
+
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _out(output_dir: Path | None, filename: str) -> Path:
+    """Resolve a filename to output_dir, or keep it as a local relative path."""
+    if output_dir is not None:
+        return output_dir / filename
+    return Path(filename)
+
+
 def main(
     config,
     logger,
     start_context="Hello, I am"
     ):
+    output_dir = _resolve_output_dir(config)
+    if output_dir:
+        logger.info("Output directory: %s", output_dir)
+    else:
+        logger.info("Output directory: local (output_dir not set)")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    with open("dataset/The_Verdict.txt") as f:
-        text_data = f.read()
+    dataset_dir = Path(config.dataset_dir)
+    txt_files = sorted(dataset_dir.glob("*.txt"))
+    if not txt_files:
+        raise FileNotFoundError(f"No .txt files found in {dataset_dir.resolve()}")
+    logger.info("Found %d dataset file(s) in %s", len(txt_files), dataset_dir.resolve())
+
+    eos = config.tokenizer['eos_token']
+    texts = []
+    for fpath in txt_files:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            texts.append(f.read())
+    text_data = f" {eos} ".join(texts)
 
     if config.tokenizer['tok_load_from'] == "":
-        logger.info("Training a new tokenizer...")
+        # BPE training is O(n) in text length — cap the sample to avoid OOM
+        # on large corpora. 10 MB of diverse text is enough for 32k merges.
+        tok_max_chars = config.tokenizer.get('tok_train_max_chars', 10_000_000)
+        tok_train_text = text_data[:tok_max_chars]
+        logger.info(
+            "Training a new tokenizer on %.1f MB sample (full corpus: %.1f MB)...",
+            len(tok_train_text) / 1e6,
+            len(text_data) / 1e6,
+        )
         tokenizer = BPETokenizer()
         tokenizer.fit(
-            text_data,
+            tok_train_text,
             vocab_size=config.tokenizer['vocab_size'],
             min_freq=config.tokenizer['min_freq'],
             eos_token=config.tokenizer['eos_token'],
@@ -47,11 +104,14 @@ def main(
         )
 
         if config.tokenizer['tok_save_path'] != "":
-            tokenizer.save(config.tokenizer['tok_save_path'])
-            logger.info("Tokenizer trained and saved to %s", config.tokenizer['tok_save_path'])
+            tok_save = _out(output_dir, config.tokenizer['tok_save_path'])
+            tok_save.parent.mkdir(parents=True, exist_ok=True)
+            tokenizer.save(str(tok_save))
+            logger.info("Tokenizer trained and saved to %s", tok_save)
     else:
-        logger.info("Loading existing tokenizer from %s", config.tokenizer['tok_load_from'])
-        tokenizer = BPETokenizer(config.tokenizer['tok_load_from'])
+        tok_load = config.tokenizer['tok_load_from']
+        logger.info("Loading existing tokenizer from %s", tok_load)
+        tokenizer = BPETokenizer(tok_load)
     
     MODEL_CONFIG = {
         "vocab_size": len(tokenizer.str2int),                   # Vocabulary size
@@ -109,32 +169,62 @@ def main(
 
     print(token_ids_to_text(out, tokenizer))
 
-    # Train/validation ratio
+    # ── Tokenise corpus (with disk cache) ───────────────────────────────────
+    # tokenizer.encode() is O(n × merges) in pure Python — encoding the full
+    # corpus at once would take days.  We therefore:
+    #   1. Cap the text at encode_max_chars (default 30 MB).
+    #   2. Cache the resulting token-ID tensor to disk so subsequent runs
+    #      skip encoding entirely and load in seconds.
+    encode_max = config.dataloader.get('encode_max_chars', 30_000_000)
+    encode_text = text_data[:encode_max]
+    logger.info(
+        "Corpus for training: %.1f MB (encode_max_chars=%.0f M)",
+        len(encode_text) / 1e6, encode_max / 1e6,
+    )
+
+    cache_path = _out(output_dir, "tokens_cache.pt") if output_dir \
+        else Path("tokens_cache.pt")
+
+    if cache_path.exists():
+        logger.info("Loading cached token IDs from %s ...", cache_path)
+        all_token_ids = torch.load(cache_path, weights_only=True)
+        logger.info("Cache loaded: %d tokens", len(all_token_ids))
+    else:
+        logger.info(
+            "Encoding %.1f MB of text — this runs on CPU and may take "
+            "30–90 minutes depending on vocab size. It will be cached "
+            "to disk and skipped on future runs.", len(encode_text) / 1e6
+        )
+        all_token_ids = tokenizer.encode(encode_text)
+        torch.save(all_token_ids, cache_path)
+        logger.info(
+            "Encoded %d tokens → cached to %s", len(all_token_ids), cache_path
+        )
+
+    # ── Train / validation split ─────────────────────────────────────────────
     train_ratio = config.llm_train['train_val_split']
-    split_idx = int(train_ratio * len(text_data))
-    train_data = text_data[:split_idx]
-    val_data = text_data[split_idx:]
+    split_idx = int(train_ratio * len(all_token_ids))
+    train_ids = all_token_ids[:split_idx]
+    val_ids   = all_token_ids[split_idx:]
 
     train_loader = create_dataloader(
-        train_data,
-        tokenizer,
+        train_ids,
         batch_size=config.dataloader['batch_size'],
         context_length=MODEL_CONFIG["context_length"],
         stride=config.dataloader['stride'],
         drop_last=config.dataloader['drop_last'],
         shuffle=config.dataloader['shuffle'],
-        num_workers=config.dataloader['num_workers']
+        num_workers=config.dataloader['num_workers'],
     )
 
     val_loader = create_dataloader(
-        val_data,
-        tokenizer,
+        val_ids,
         batch_size=config.dataloader['batch_size'],
         context_length=MODEL_CONFIG["context_length"],
         stride=MODEL_CONFIG["context_length"],
         drop_last=False,
         shuffle=False,
-        num_workers=config.dataloader['num_workers']
+        num_workers=config.dataloader['num_workers'],
     )
 
     print("Train loader:")
@@ -177,33 +267,38 @@ def main(
         optimizer,
         device,
         num_epochs=num_epochs,
-        eval_freq=5,
-        eval_iter=5,
-        start_context="Every effort moves you",
+        eval_freq=config.llm_train.get('eval_freq', 500),
+        eval_iter=config.llm_train.get('eval_iter', 20),
+        start_context="Українська мова",
         tokenizer=tokenizer,
         temperature=config.llm_gen['temperature'],
-        top_k=config.llm_gen['top_k']
+        top_k=config.llm_gen['top_k'],
+        patience=config.llm_train.get('patience', 3),
+        save_best_path=str(_out(output_dir, config.llm_train['model_save_path']))
+            if config.llm_train.get('model_save_path') else None,
     )
     model.eval()
 
     end_time = time()
 
     if config.llm_train['model_save_path']:
-        path = Path(config.llm_train['model_save_path'])
-        os.makedirs(path.parent, exist_ok=True)
-
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict()
+        final_path = _out(output_dir, config.llm_train['model_save_path'])
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
             },
-            path
+            final_path,
         )
+        logger.info("Final model saved to %s", final_path)
 
     execution_time_minutes = (end_time - start_time) / 60
     print(f"Training completed in {execution_time_minutes:.2f} minutes.")
 
     epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
-    plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+    plot_path = str(_out(output_dir, "loss-plot.pdf"))
+    plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses, plot_path)
 
     for i in range(5):
         print(f"\nSample {i+1}:")
@@ -227,5 +322,5 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)
         config = SimpleNamespace(**config)
     
-    start_context = "Hello, I am"
+    start_context = "Українська мова"
     main(config, logger, start_context)

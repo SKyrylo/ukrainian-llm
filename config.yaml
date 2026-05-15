@@ -1,19 +1,30 @@
+dataset_dir: "dataset"
+
+# All files produced during training (tokenizer, checkpoints, loss plot) are
+# written under output_dir.  Set this to your Google Drive folder when running
+# in Colab so nothing is lost when the runtime stops.
+# Example:  output_dir: "/content/drive/MyDrive/llm"
+# Leave empty to save next to this config file (local runs).
+output_dir: "/content/drive/MyDrive/llm"
+
 tokenizer:
-  tok_load_from: ""                        # Empty str to train a new tokenizer
-  tok_save_path: "dataset/tokenizer.json"  # Empty str to NOT save the tokenizer
-  vocab_size: 500                          # Target vocabulary size
+  tok_load_from: ""                        # Empty str to train a new tokenizer; otherwise path to tokenizer.json
+  tok_save_path: "tokenizer.json"          # Filename inside output_dir (or local path when output_dir is empty)
+  vocab_size: 32000                        # Target vocabulary size
+  tok_train_max_chars: 10000000            # Max chars used to train the tokenizer (10 MB is enough for 32k merges)
   min_freq: null                           # null to train until the vocabulary size is reached
   eos_token: "<|EOS|>"                     # End of sequence token
   unk_token: "<|UNK|>"                     # Unknown token
 
 
 dataloader:
-  batch_size: 2                            # Batch size
-  context_length: 768                      # Maximum sequence length (context window)
-  stride: 100                              # Overlapping sequence length
+  batch_size: 8                            # Batch size
+  context_length: 1024                     # Maximum sequence length (context window)
+  stride: 512                              # Overlapping sequence length
   drop_last: true                          # Drop the last batch if it's not full
   shuffle: true                            # Shuffle the data
-  num_workers: 0                           # Number of workers to use for data loading
+  num_workers: 2                           # Number of workers to use for data loading
+  encode_max_chars: 30000000               # Chars of corpus to encode (30 MB ≈ 5M tokens). Result cached to disk.
 
 
 optimizer:
@@ -31,9 +42,12 @@ llm_init:
 
 llm_train:
   from_pretrained: ""                      # Path to a pretrained model (empty str to train from scratch)
-  model_save_path: "models/model.pth"      # Path to save the trained model (empty str to not save)
-  epochs: 1                                # Number of training epochs
+  model_save_path: "model.pth"            # Filename inside output_dir (or local path when output_dir is empty)
+  epochs: 10                               # Upper bound — early stopping will halt before this if val_loss stagnates
   train_val_split: 0.9                     # Proportion of data to use for training (the rest is used for validation)
+  eval_freq: 500                           # Evaluate every N training steps
+  eval_iter: 20                            # Batches used per evaluation
+  patience: 3                              # Early stopping: stop if val_loss hasn't improved for this many eval steps
 
 
 llm_gen:

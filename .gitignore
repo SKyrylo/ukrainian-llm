@@ -1,8 +1,9 @@
 .venv
 __pycache__/
 
-dataset/*.json
+dataset/
 models/*.pth
 
-loss-plot.pdf
+*.pdf
 .vscode/
+vocab_analysis.py

@@ -1,28 +1,23 @@
 import torch
+from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 
 
 class CustomDataset(Dataset):
-    def __init__(
-        self,
-        txt,
-        tokenizer,
-        max_length,
-        stride
-        ):
+    """Sliding-window dataset built from pre-tokenized token IDs.
+
+    Accepts a 1-D integer Tensor produced by ``tokenizer.encode()``.
+    Keeping tokenization separate from the dataset allows token IDs to be
+    cached to disk and reused across runs without re-encoding the corpus.
+    """
+
+    def __init__(self, token_ids: Tensor, max_length: int, stride: int):
         self.input_ids = []
         self.target_ids = []
 
-        # Tokenize the entire text
-        token_ids = tokenizer.encode(txt)
-
-        # Use the sliding window to chunk the data into overlapping sequences of max_length
         for i in range(0, len(token_ids) - max_length, stride):
-            input_chunk = token_ids[i:i+max_length]
-            target_chunk = token_ids[i+1:i+max_length+1]
-
-            self.input_ids.append(input_chunk.clone())
-            self.target_ids.append(target_chunk.clone())
+            self.input_ids.append(token_ids[i : i + max_length].clone())
+            self.target_ids.append(token_ids[i + 1 : i + max_length + 1].clone())
 
     def __len__(self):
         return len(self.input_ids)
@@ -32,28 +27,23 @@ class CustomDataset(Dataset):
 
 
 def create_dataloader(
-    txt,
-    tokenizer,
-    batch_size=4,
-    context_length=256,
-    stride=128,
-    shuffle=True,
-    drop_last=True,
-    num_workers=0
-    ):
-    # Create the dataset
-    dataset = CustomDataset(txt, tokenizer, context_length, stride)
-
-    # Create the dataloader
-    dataloader = DataLoader(
+    token_ids: Tensor,
+    batch_size: int = 4,
+    context_length: int = 256,
+    stride: int = 128,
+    shuffle: bool = True,
+    drop_last: bool = True,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Create a DataLoader from pre-tokenized token IDs."""
+    dataset = CustomDataset(token_ids, context_length, stride)
+    return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         drop_last=drop_last,
-        num_workers=num_workers
+        num_workers=num_workers,
     )
-
-    return dataloader
 
 
 if __name__ == "__main__":
