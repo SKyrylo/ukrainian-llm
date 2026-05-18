@@ -1,53 +1,132 @@
+# ============================================================
+# Project dependencies — pinned versions for reproducibility.
+# Install with:  pip install -r requirements.txt
+# ============================================================
+
+# --- Type annotation helpers --------------------------------
+# annotated-types provides runtime-usable metadata for PEP 681 type hints
 annotated-types==0.7.0
+
+# --- Source introspection / IPython stack tools -------------
+# asttokens maps AST nodes back to source token positions (used by IPython)
 asttokens==3.0.1
+# colorama enables cross-platform ANSI color codes in Windows terminals
 colorama==0.4.6
+# comm is the low-level Jupyter kernel communication protocol implementation
 comm==0.2.3
+
+# --- Plotting / visualization chain -------------------------
+# contourpy draws filled contour plots; required by matplotlib
 contourpy==1.3.3
+# cycler provides composable style cycling for matplotlib color/line properties
 cycler==0.12.1
+# debugpy is the Python DAP debugger server used by VS Code and Cursor
 debugpy==1.8.20
+# decorator provides a clean API for writing well-behaved function decorators
 decorator==5.2.1
+# executing identifies the currently-running AST node; used for rich IPython tracebacks
 executing==2.2.1
+
+# --- File system / caching utilities -----------------------
+# filelock implements cross-platform file locking used by HuggingFace / PyTorch caches
 filelock==3.29.0
+# fonttools parses and manipulates font files; matplotlib uses it for text rendering
 fonttools==4.62.1
+# fsspec is a unified filesystem interface used by PyTorch dataset and checkpoint utilities
 fsspec==2026.3.0
+
+# --- Jupyter kernel / notebook runtime ---------------------
+# ipykernel is the IPython kernel that executes code inside Jupyter notebooks
 ipykernel==7.2.0
+# ipython is the enhanced interactive shell powering Jupyter and the REPL
 ipython==9.13.0
+# ipython_pygments_lexers adds Python-specific syntax highlighting inside IPython
 ipython_pygments_lexers==1.1.1
+# jedi is the static-analysis autocompletion backend used by IPython
 jedi==0.19.2
+# Jinja2 is a template engine used by Jupyter and PyTorch compiler internals
 Jinja2==3.1.6
+# jupyter_client manages ZMQ communication between the Jupyter frontend and kernel
 jupyter_client==8.8.0
+# jupyter_core provides shared path management and base config for all Jupyter packages
 jupyter_core==5.9.1
+
+# --- Plotting layout / math dependencies -------------------
+# kiwisolver is a fast constraint solver for matplotlib's layout engine
 kiwisolver==1.5.0
+# MarkupSafe escapes HTML/XML special characters; required by Jinja2
 MarkupSafe==3.0.3
+# matplotlib is the main plotting library used to render and save loss curves
 matplotlib==3.10.9
+# matplotlib-inline renders matplotlib figures inline inside Jupyter notebooks
 matplotlib-inline==0.2.1
+# mpmath provides arbitrary-precision arithmetic; required by sympy and PyTorch
 mpmath==1.3.0
+# nest-asyncio patches asyncio to allow nested event loops inside Jupyter
 nest-asyncio==1.6.0
+# networkx provides graph algorithms; required by PyTorch's torch.fx tracing
 networkx==3.6.1
+
+# --- Numerical computing -----------------------------------
+# numpy is the fundamental N-dimensional array library used throughout the pipeline
 numpy==2.4.4
+# packaging parses PEP 440 version strings and dependency specifiers
 packaging==26.2
+
+# --- Python parsing / completion infrastructure ------------
+# parso is the Python parser underneath jedi for syntax-tree analysis
 parso==0.8.6
+# pillow is the image library; matplotlib uses it for saving PNG/JPEG plot files
 pillow==12.2.0
+# platformdirs finds the correct OS-specific directory for user data, cache, and config
 platformdirs==4.9.6
+# prompt_toolkit is the readline-replacement that powers IPython's interactive input
 prompt_toolkit==3.0.52
+# psutil exposes process and system metrics; IPython uses it for memory tracking
 psutil==7.2.2
+# pure_eval safely evaluates simple Python expressions for richer IPython tracebacks
 pure_eval==0.2.3
+# pydantic_core is the high-performance Rust core of the Pydantic v2 library
 pydantic_core==2.46.4
+# Pygments is the syntax highlighter used by IPython and Jupyter for code colouring
 Pygments==2.20.0
+# pyparsing is a general parsing toolkit; used internally by matplotlib style parsing
 pyparsing==3.3.2
+
+# --- Date / time and environment utilities -----------------
+# python-dateutil extends the standard datetime module with flexible parsing
 python-dateutil==2.9.0.post0
+# python-dotenv loads key=value pairs from a .env file into os.environ at startup
 python-dotenv==1.2.2
+# PyYAML parses the config.yaml file that controls all training hyperparameters
 PyYAML==6.0.3
+# pyzmq wraps the ZMQ socket library; Jupyter kernels communicate over ZMQ sockets
 pyzmq==27.1.0
+# setuptools provides the package build and distribution infrastructure
 setuptools==81.0.0
+# six is a Python 2/3 compatibility shim kept for legacy transitive dependencies
 six==1.17.0
+# stack-data extracts enriched stack-frame info for better IPython tracebacks
 stack-data==0.6.3
+# sympy is a symbolic mathematics library required by PyTorch's compiler internals
 sympy==1.14.0
+
+# --- Deep learning framework (core dependency) -------------
+# torch (PyTorch) is the deep learning framework used for model definition and training
 torch==2.11.0
+# tornado is an async networking framework; Jupyter uses it to run its HTTP server
 tornado==6.5.5
+# tqdm renders progress bars in the terminal; used during BPE tokenizer training
 tqdm==4.67.3
+# traitlets provides a typed attribute system used by Jupyter and IPython internals
 traitlets==5.14.3
+
+# --- Type system helpers -----------------------------------
+# typing-inspection allows runtime introspection of PEP 484 type annotation objects
 typing-inspection==0.4.2
+# typing_extensions backports newer typing constructs to older Python versions
 typing_extensions==4.15.0
+# uv is an ultra-fast Python package installer and resolver (drop-in pip replacement)
 uv==0.11.7
+# wcwidth measures the display width of Unicode characters; used by prompt_toolkit
 wcwidth==0.6.0
