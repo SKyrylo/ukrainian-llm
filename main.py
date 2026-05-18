@@ -85,18 +85,10 @@ def main(
     text_data = f" {eos} ".join(texts)
 
     if config.tokenizer['tok_load_from'] == "":
-        # BPE training is O(n) in text length — cap the sample to avoid OOM
-        # on large corpora. 10 MB of diverse text is enough for 32k merges.
-        tok_max_chars = config.tokenizer.get('tok_train_max_chars', 10_000_000)
-        tok_train_text = text_data[:tok_max_chars]
-        logger.info(
-            "Training a new tokenizer on %.1f MB sample (full corpus: %.1f MB)...",
-            len(tok_train_text) / 1e6,
-            len(text_data) / 1e6,
-        )
+        logger.info("Training a new tokenizer on %.1f MB...", len(text_data) / 1e6)
         tokenizer = BPETokenizer()
         tokenizer.fit(
-            tok_train_text,
+            text_data,
             vocab_size=config.tokenizer['vocab_size'],
             min_freq=config.tokenizer['min_freq'],
             eos_token=config.tokenizer['eos_token'],
@@ -169,46 +161,15 @@ def main(
 
     print(token_ids_to_text(out, tokenizer))
 
-    # ── Tokenise corpus (with disk cache) ───────────────────────────────────
-    # tokenizer.encode() is O(n × merges) in pure Python — encoding the full
-    # corpus at once would take days.  We therefore:
-    #   1. Cap the text at encode_max_chars (default 30 MB).
-    #   2. Cache the resulting token-ID tensor to disk so subsequent runs
-    #      skip encoding entirely and load in seconds.
-    encode_max = config.dataloader.get('encode_max_chars', 30_000_000)
-    encode_text = text_data[:encode_max]
-    logger.info(
-        "Corpus for training: %.1f MB (encode_max_chars=%.0f M)",
-        len(encode_text) / 1e6, encode_max / 1e6,
-    )
-
-    cache_path = _out(output_dir, "tokens_cache.pt") if output_dir \
-        else Path("tokens_cache.pt")
-
-    if cache_path.exists():
-        logger.info("Loading cached token IDs from %s ...", cache_path)
-        all_token_ids = torch.load(cache_path, weights_only=True)
-        logger.info("Cache loaded: %d tokens", len(all_token_ids))
-    else:
-        logger.info(
-            "Encoding %.1f MB of text — this runs on CPU and may take "
-            "30–90 minutes depending on vocab size. It will be cached "
-            "to disk and skipped on future runs.", len(encode_text) / 1e6
-        )
-        all_token_ids = tokenizer.encode(encode_text)
-        torch.save(all_token_ids, cache_path)
-        logger.info(
-            "Encoded %d tokens → cached to %s", len(all_token_ids), cache_path
-        )
-
-    # ── Train / validation split ─────────────────────────────────────────────
+    # Train/validation split
     train_ratio = config.llm_train['train_val_split']
-    split_idx = int(train_ratio * len(all_token_ids))
-    train_ids = all_token_ids[:split_idx]
-    val_ids   = all_token_ids[split_idx:]
+    split_idx = int(train_ratio * len(text_data))
+    train_data = text_data[:split_idx]
+    val_data   = text_data[split_idx:]
 
     train_loader = create_dataloader(
-        train_ids,
+        train_data,
+        tokenizer,
         batch_size=config.dataloader['batch_size'],
         context_length=MODEL_CONFIG["context_length"],
         stride=config.dataloader['stride'],
@@ -218,7 +179,8 @@ def main(
     )
 
     val_loader = create_dataloader(
-        val_ids,
+        val_data,
+        tokenizer,
         batch_size=config.dataloader['batch_size'],
         context_length=MODEL_CONFIG["context_length"],
         stride=MODEL_CONFIG["context_length"],
