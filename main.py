@@ -12,14 +12,16 @@
 # 6. Build the MODEL_CONFIG dictionary from the tokenizer and config values.
 # 7. Instantiate a GPTModel from scratch OR load weights from a checkpoint file.
 # 8. Print a baseline text sample from the untrained / loaded model.
-# 9. Split the text into train and validation sets and build DataLoader objects.
-# 10. Evaluate pre-training losses on both splits.
-# 11. Run the training loop (train_model) — includes periodic evaluation,
+# 9. Encode the full corpus once (loading from disk cache when available),
+#    split at the token level, and build DataLoader objects for both splits.
+# 10. Run the training loop (train_model) — includes periodic evaluation,
 #     qualitative sample generation, early stopping, and best-model saving.
-# 12. Save the final model checkpoint to disk.
-# 13. Plot and save the train/val loss curves as a PDF.
-# 14. Generate 5 text samples from the trained model for final inspection.
+# 11. Save the final model checkpoint to disk.
+# 12. Plot and save the train/val loss curves as a PDF.
+# 13. Generate 5 text samples from the trained model for final inspection.
+import hashlib
 import torch
+from typing import List
 
 # Import the sliding-window DataLoader factory for the training and val splits
 from src.dataloader import create_dataloader
@@ -30,8 +32,6 @@ from src.llm_utils import (
     generate,
     text_to_token_ids,
     token_ids_to_text,
-    calc_loss_batch,
-    calc_loss_loader,
     train_model,
     plot_losses
 )
@@ -107,6 +107,182 @@ def _out(output_dir: Path | None, filename: str) -> Path:
 
 
 # -----------------------------------------------------------------------
+# _encode_incrementally — encode a corpus file-by-file with periodic
+# checkpoint saving and automatic resume across Colab sessions.
+#
+# Why file-by-file instead of one joined string
+# ----------------------------------------------
+# The previous approach joined all files into one giant string and called
+# tokenizer.encode() once.  That meant the entire encoding job had to
+# finish in a single Python process run — if Colab killed the session
+# after 11 hours, all progress was lost.
+#
+# This function encodes each file individually, accumulates the token IDs,
+# and writes a partial checkpoint to disk every SAVE_EVERY files.  If the
+# session is killed, restarting main.py will load the checkpoint and
+# continue from the last saved position.  The final token_cache.pt is
+# identical to what the old approach would have produced.
+#
+# Cache invalidation
+# ------------------
+# The cache key is an MD5 of (filename + file-size for every file, in
+# sorted order) concatenated with the tokenizer's vocab size.  Hashing
+# file metadata is instant compared to hashing 700 MB of text, and the
+# key changes correctly when files are added/removed/replaced or the
+# tokenizer is retrained.
+#
+# Spacing note
+# ------------
+# The original pipeline joined files with f" {eos} " which produces chunks
+# like ["text1 ", "<EOS>", " text2 ", "<EOS>", " text3"].  This function
+# recreates the same spacing around each file so that the resulting token
+# IDs are bit-for-bit identical to the old single-pass approach.
+# -----------------------------------------------------------------------
+def _encode_incrementally(
+    txt_files,
+    eos_token: str,
+    tokenizer,
+    cache_path: Path,
+    logger,
+    save_every: int = 200,   # save a checkpoint every this many files
+) -> torch.Tensor:
+    """Encode *txt_files* one by one, saving checkpoints every *save_every* files.
+
+    Returns the full concatenated token-ID tensor (same result as encoding
+    the joined corpus string in one pass).
+    """
+    # ---- Build the cache key from file metadata (fast — no text hashing) ----
+    meta_parts = "|".join(
+        f"{f.name}:{f.stat().st_size}" for f in txt_files
+    )
+    cache_meta = "v2-" + hashlib.md5(
+        f"{meta_parts}|vocab={len(tokenizer.str2int)}".encode()
+    ).hexdigest()
+
+    # ---- Full cache hit: skip encoding entirely -----------------------------
+    if cache_path.exists():
+        try:
+            cached = torch.load(cache_path, weights_only=True)
+            if cached.get("meta") == cache_meta:
+                token_ids = cached["token_ids"]
+                logger.info(
+                    "Loaded %d cached tokens from %s", len(token_ids), cache_path
+                )
+                return token_ids
+            else:
+                logger.info("Token cache is stale — re-encoding corpus...")
+        except Exception as exc:
+            logger.warning("Cache unreadable (%s) — re-encoding...", exc)
+
+    # ---- Check for a partial checkpoint (resume across sessions) ------------
+    # The checkpoint lives alongside the final cache so it ends up on Drive
+    ckpt_path = cache_path.with_name("encode_checkpoint.pt")
+    n = len(txt_files)
+    eos_id = tokenizer.str2int.get(eos_token, 0)
+    start_idx = 0
+    accumulated_ids: List[torch.Tensor] = []
+
+    if ckpt_path.exists():
+        try:
+            ckpt = torch.load(ckpt_path, weights_only=True)
+            if ckpt.get("meta") == cache_meta and ckpt.get("files_done", 0) > 0:
+                accumulated_ids = [ckpt["token_ids"]]
+                start_idx = ckpt["files_done"]
+                logger.info(
+                    "Resuming from checkpoint: %d / %d files already encoded "
+                    "(%d tokens so far)",
+                    start_idx, n, len(ckpt["token_ids"]),
+                )
+            else:
+                logger.info(
+                    "Checkpoint found but does not match current corpus — "
+                    "starting fresh"
+                )
+        except Exception as exc:
+            logger.warning("Checkpoint unreadable (%s) — starting fresh", exc)
+
+    if start_idx == 0:
+        logger.info(
+            "Encoding %d files (checkpoint saved every %d files → %s)...",
+            n, save_every, ckpt_path,
+        )
+
+    # ---- Encode file by file with a tqdm bar --------------------------------
+    from tqdm import tqdm
+    with tqdm(
+        total=n,
+        initial=start_idx,
+        desc="Encoding",
+        unit="file",
+    ) as pbar:
+        for i in range(start_idx, n):
+            fpath = txt_files[i]
+
+            # Read each file on demand so we never hold the full 700 MB corpus
+            # in RAM as a single Python string
+            with open(fpath, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+
+            # Reproduce the spacing that f" {eos_token} ".join(texts) would create
+            # so the resulting token IDs match the original single-pass approach:
+            #   first  file: "text "        (trailing space before EOS)
+            #   middle files: " text "      (both spaces)
+            #   last   file: " text"        (leading space after EOS, no trailing)
+            #   only   file: "text"         (no spaces, no EOS)
+            if n == 1:
+                chunk = text
+            elif i == 0:
+                chunk = text + " "
+            elif i == n - 1:
+                chunk = " " + text
+            else:
+                chunk = " " + text + " "
+
+            # Encode this one file's chunk (fast with the heap-based encoder)
+            file_ids = tokenizer.encode(chunk)
+            accumulated_ids.append(file_ids)
+
+            # Insert the EOS token between every pair of documents
+            if i < n - 1:
+                accumulated_ids.append(torch.tensor([eos_id]))
+
+            # Update the progress bar with the current filename
+            name = fpath.name
+            if len(name) > 40:
+                name = "…" + name[-39:]
+            pbar.set_description(f"Encoding  {name}")
+            pbar.update(1)
+
+            # Save a checkpoint every save_every files.  We also concatenate
+            # the accumulated tensors into one before saving to keep the
+            # checkpoint file small and to release individual tensor memory.
+            files_done = i + 1
+            if (files_done - start_idx) % save_every == 0:
+                partial = torch.cat(accumulated_ids)
+                # Replace list with a single tensor so earlier tensors can be GC'd
+                accumulated_ids = [partial]
+                torch.save(
+                    {"meta": cache_meta, "token_ids": partial, "files_done": files_done},
+                    ckpt_path,
+                )
+                logger.info(
+                    "  Checkpoint: %d / %d files, %d tokens → %s",
+                    files_done, n, len(partial), ckpt_path,
+                )
+
+    # ---- All files done: save the final cache and remove the checkpoint -----
+    all_token_ids = torch.cat(accumulated_ids)
+    torch.save({"meta": cache_meta, "token_ids": all_token_ids}, cache_path)
+    logger.info(
+        "Encoding complete: %d tokens → %s", len(all_token_ids), cache_path
+    )
+    if ckpt_path.exists():
+        ckpt_path.unlink()
+
+    return all_token_ids
+
+
+# -----------------------------------------------------------------------
 # main — orchestrates the complete training pipeline
 # -----------------------------------------------------------------------
 # Parameters
@@ -138,21 +314,25 @@ def main(
         raise FileNotFoundError(f"No .txt files found in {dataset_dir.resolve()}")
     logger.info("Found %d dataset file(s) in %s", len(txt_files), dataset_dir.resolve())
 
-    # Step 4 — load all text files and join them with EOS separators
-    # The EOS token between documents prevents the model from learning to
-    # predict across document boundaries as if they were continuous text
+    # Step 4 + 5 — tokenizer: train a new one or load an existing one from disk
+    #
+    # When training a new tokenizer we must read all corpus text up-front.
+    # When loading a pre-trained tokenizer we skip that expensive read
+    # entirely; the encoding step (_encode_incrementally) will read files
+    # on demand one by one, so we never hold the full 700 MB corpus in RAM.
     eos = config.tokenizer['eos_token']
-    texts = []
-    for fpath in txt_files:
-        # errors="replace" handles any stray non-UTF-8 bytes gracefully
-        with open(fpath, encoding="utf-8", errors="replace") as f:
-            texts.append(f.read())
-    # Single flat string: doc1 <EOS> doc2 <EOS> doc3 ...
-    text_data = f" {eos} ".join(texts)
 
-    # Step 5 — tokenizer: train a new one or load an existing one from disk
     if config.tokenizer['tok_load_from'] == "":
-        # No pre-existing tokenizer — fit a new BPE tokenizer on the full corpus
+        # ---- Train a brand-new tokenizer ------------------------------------
+        # We need the full corpus as one string for BPE frequency counting
+        texts = []
+        for fpath in txt_files:
+            # errors="replace" handles any stray non-UTF-8 bytes gracefully
+            with open(fpath, encoding="utf-8", errors="replace") as f:
+                texts.append(f.read())
+        # Single flat string: doc1 <EOS> doc2 <EOS> doc3 ...
+        text_data = f" {eos} ".join(texts)
+
         logger.info("Training a new tokenizer on %.1f MB...", len(text_data) / 1e6)
         tokenizer = BPETokenizer()
         # fit() runs the BPE merge loop until vocab_size tokens are learned
@@ -172,7 +352,7 @@ def main(
             tokenizer.save(str(tok_save))
             logger.info("Tokenizer trained and saved to %s", tok_save)
     else:
-        # Load an existing tokenizer from the path specified in config
+        # ---- Load a pre-trained tokenizer (no corpus read needed here) ------
         tok_load = config.tokenizer['tok_load_from']
         logger.info("Loading existing tokenizer from %s", tok_load)
         tokenizer = BPETokenizer(tok_load)
@@ -252,22 +432,69 @@ def main(
 
     print(token_ids_to_text(out, tokenizer))
 
-    # Train/validation split
-    # train_ratio controls what fraction of the corpus is used for training;
-    # the remainder becomes the validation set
-    train_ratio = config.llm_train['train_val_split']
-    split_idx = int(train_ratio * len(text_data))
-    # Training data: the first (train_ratio * 100)% of the corpus
-    train_data = text_data[:split_idx]
-    # Validation data: the remaining portion of the corpus
-    val_data   = text_data[split_idx:]
+    # Step 9 — encode the full corpus once, cache the result to disk, and
+    # split at the token level into training and validation sets.
+    #
+    # WHY encode once: encoding 700 MB of Ukrainian text against 31 K BPE
+    # merge rules is O(corpus × log corpus) with the new heap-based encoder,
+    # typically finishing in under an hour.  The result is cached as
+    # token_cache.pt so every subsequent run is instant (milliseconds).
+    #
+    # WHY split at the token level: splitting the raw text string at a
+    # character offset and encoding each half independently would double
+    # the encoding work.  Splitting the token tensor is O(1) and gives
+    # an exact train/val ratio at the token level.
+    #
+    # Checkpoint safety: if the Colab session is killed mid-encoding,
+    # encode_checkpoint.pt in the same output directory records how many
+    # files were done.  Re-running main.py picks up automatically from
+    # the last checkpoint — no work is lost.
+    # If token_cache_from is set in config, load that file directly and skip
+    # encoding entirely.  Use this on Kaggle (or any run) when you have a
+    # pre-built cache from a different machine (e.g. Colab) whose file list
+    # differs from the current dataset_dir, so the automatic cache-key check
+    # would incorrectly report the cache as stale.
+    prebuilt_cache = getattr(config, 'token_cache_from', '') or ''
+    if prebuilt_cache:
+        logger.info("Loading pre-built token cache from %s", prebuilt_cache)
+        _loaded = torch.load(prebuilt_cache, weights_only=True)
+        # Support both the {meta, token_ids} dict format and a bare tensor
+        all_token_ids = (
+            _loaded["token_ids"] if isinstance(_loaded, dict) else _loaded
+        )
+        logger.info("Loaded %d tokens from pre-built cache", len(all_token_ids))
+    else:
+        cache_path = _out(output_dir, "token_cache.pt")
+        all_token_ids = _encode_incrementally(
+            txt_files, eos, tokenizer, cache_path, logger,
+        )
 
-    # Step 9 — create DataLoader objects for training and validation
-    # Training loader uses random shuffling and drops the last incomplete batch
-    # to guarantee uniform batch sizes during gradient updates
+    # Compute the split index in token space
+    train_ratio = config.llm_train['train_val_split']
+    split_token_idx = int(train_ratio * len(all_token_ids))
+    # Training slice: first train_ratio fraction of the encoded corpus
+    train_token_ids = all_token_ids[:split_token_idx]
+    # Validation slice: remaining tokens
+    val_token_ids   = all_token_ids[split_token_idx:]
+    logger.info(
+        "Token split: %d train / %d val  (%.0f%% / %.0f%%)",
+        len(train_token_ids), len(val_token_ids),
+        train_ratio * 100, (1 - train_ratio) * 100,
+    )
+
+    # encode_only mode: exit here once the cache has been written to disk.
+    # Use this on a CPU session to pay the one-time encoding cost and persist
+    # token_cache.pt to output_dir without running the (GPU-intensive) training.
+    # Set encode_only: false (or omit the key) in config.yaml for training runs.
+    if getattr(config, 'encode_only', False):
+        logger.info(
+            "encode_only=true — token cache saved to %s. Exiting.", cache_path
+        )
+        return
+
+    # Build DataLoaders from the pre-encoded token tensors — no encoding here
     train_loader = create_dataloader(
-        train_data,
-        tokenizer,
+        train_token_ids,
         batch_size=config.dataloader['batch_size'],
         context_length=MODEL_CONFIG["context_length"],
         stride=config.dataloader['stride'],
@@ -279,55 +506,22 @@ def main(
     # Validation loader uses stride == context_length (no overlap between windows)
     # to avoid evaluating the same tokens twice, and no shuffling to keep order
     val_loader = create_dataloader(
-        val_data,
-        tokenizer,
+        val_token_ids,
         batch_size=config.dataloader['batch_size'],
         context_length=MODEL_CONFIG["context_length"],
-        # Validation stride equals context_length so windows tile exactly
+        # Validation stride equals context_length so windows tile without overlap
         stride=MODEL_CONFIG["context_length"],
         drop_last=False,
         shuffle=False,
         num_workers=config.dataloader['num_workers'],
     )
 
-    # Print one batch shape to verify that the loader is producing the expected sizes
-    print("Train loader:")
-    for x, y in train_loader:
-        print(x.shape, y.shape)
-        break
+    logger.info(
+        "Dataloaders ready: %d train batches, %d val batches",
+        len(train_loader), len(val_loader),
+    )
 
-    print("\nValidation loader:")
-    for x, y in val_loader:
-        print(x.shape, y.shape)
-        break
-
-    # Print the number of batches in each loader for reference
-    print(len(train_loader))
-    print(len(val_loader))
-
-    # Compute and report the approximate token counts in each split
-    context_length = MODEL_CONFIG["context_length"]
-    # dataset length × context_length gives the total tokens represented in the loader
-    train_tokens = len(train_loader.dataset) * context_length
-    val_tokens = len(val_loader.dataset) * context_length
-
-    print("Training tokens:", train_tokens)
-    print("Validation tokens:", val_tokens)
-    print("All tokens:", train_tokens + val_tokens)
-
-    # Step 10 — evaluate pre-training loss on 5 batches from each split
-    # These values provide a baseline to compare against post-training losses
-    model.eval()
-    with torch.no_grad():
-        # num_batches=5 gives a quick estimate; increase for a more exact measurement
-        train_loss = calc_loss_loader(train_loader, model, device, num_batches=5)
-        val_loss = calc_loss_loader(val_loader, model, device, num_batches=5)
-    model.train()
-
-    print("Training loss:", train_loss)
-    print("Validation loss:", val_loss)
-
-    # Step 11 — run the training loop and record elapsed wall-clock time
+    # Step 10 — run the training loop and record elapsed wall-clock time
     start_time = time()
 
     num_epochs = config.llm_train['epochs']
@@ -357,7 +551,7 @@ def main(
 
     end_time = time()
 
-    # Step 12 — save the final model checkpoint
+    # Step 11 — save the final model checkpoint
     # This saves the model after all epochs (which may not be the best checkpoint
     # if early stopping fired; the best checkpoint was already saved during training)
     if config.llm_train['model_save_path']:
@@ -378,14 +572,14 @@ def main(
     execution_time_minutes = (end_time - start_time) / 60
     print(f"Training completed in {execution_time_minutes:.2f} minutes.")
 
-    # Step 13 — plot and save the loss curves
+    # Step 12 — plot and save the loss curves
     # linspace maps checkpoint indices to fractional epoch positions so the
     # x-axis scale is accurate even when eval_freq doesn't divide num_epochs evenly
     epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
     plot_path = str(_out(output_dir, "loss-plot.pdf"))
     plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses, plot_path)
 
-    # Step 14 — generate 5 diverse text samples from the trained model
+    # Step 13 — generate 5 diverse text samples from the trained model
     # These provide a qualitative assessment of the model's language quality
     for i in range(5):
         print(f"\nSample {i+1}:")

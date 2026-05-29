@@ -1,28 +1,44 @@
-dataset_dir: "dataset"
+dataset_dir: "/kaggle/input/datasets/skyrylo/llm-training-dataset-v6/dataset"
 
-# All files produced during training (tokenizer, checkpoints, loss plot) are
-# written under output_dir.  Set this to your Google Drive folder when running
-# in Colab so nothing is lost when the runtime stops.
-# Example:  output_dir: "/content/drive/MyDrive/llm"
-# Leave empty to save next to this config file (local runs).
-output_dir: "/content/drive/MyDrive/llm"
+# All files produced during this run (tokenizer, token cache, checkpoints,
+# loss plot) are written under output_dir.
+#
+# Colab  → "/content/drive/MyDrive/llm"   (Drive must be mounted first)
+# Kaggle → "/kaggle/working"
+# Local  → leave empty (files are written next to this config)
+output_dir: "/kaggle/working"
+
+# Set to true to encode the corpus, save token_cache.pt to output_dir, and
+# exit immediately — without initialising the model or running training.
+# Intended for CPU sessions where you only want to pay the encoding cost once.
+# Set to false (or remove the key) for normal training runs.
+encode_only: false
+
+# Absolute path to a pre-built token_cache.pt produced on another machine
+# (e.g. encoded on Colab, now used for Kaggle training).  When set, the
+# encoding step is skipped entirely regardless of which files are in
+# dataset_dir.  Leave empty ("") to encode/cache normally.
+token_cache_from: "/kaggle/working/token_cache.pt"
 
 tokenizer:
-  tok_load_from: ""                        # Empty str to train a new tokenizer; otherwise path to tokenizer.json
-  tok_save_path: "tokenizer.json"          # Filename inside output_dir (or local path when output_dir is empty)
+  # Leave empty to train a new tokenizer on the current corpus and save it to
+  # output_dir/tok_save_path.  Set to an absolute path to load an existing one.
+  # Colab:  "/content/drive/MyDrive/llm/tokenizer.json"
+  tok_load_from: "/kaggle/input/datasets/skyrylo/llm-training-dataset-v6/models/tokenizer.json"
+  tok_save_path: "tokenizer.json"          # Saved as output_dir/tokenizer.json
   vocab_size: 32000                        # Target vocabulary size
-  min_freq: null                           # null to train until the vocabulary size is reached
+  min_freq: null                           # null to train until vocab_size is reached
   eos_token: "<|EOS|>"                     # End of sequence token
   unk_token: "<|UNK|>"                     # Unknown token
 
 
 dataloader:
-  batch_size: 8                            # Batch size
-  context_length: 1024                     # Maximum sequence length (context window)
-  stride: 512                              # Overlapping sequence length
+  batch_size: 4                            # Batch size
+  context_length: 512                      # Maximum sequence length (context window)
+  stride: 256                              # Step between consecutive windows
   drop_last: true                          # Drop the last batch if it's not full
   shuffle: true                            # Shuffle the data
-  num_workers: 2                           # Number of workers to use for data loading
+  num_workers: 0                           # Workers for data loading (0 = main process)
 
 
 optimizer:
@@ -31,24 +47,24 @@ optimizer:
 
 
 llm_init:
-  emb_dim: 768                             # Embedding dimension
-  n_heads: 12                              # Number of attention heads
-  n_layers: 12                             # Number of transformer layers
-  dropout: 0.1                             # Dropout rate
-  qkv_bias: false                          # Whether to include bias terms in the query key value projections
+  emb_dim: 512                             # Embedding dimension
+  n_heads: 8                               # Number of attention heads
+  n_layers: 6                              # Number of transformer layers
+  dropout: 0.2                             # Dropout rate
+  qkv_bias: false                          # Bias in query/key/value projections
 
 
 llm_train:
-  from_pretrained: ""                      # Path to a pretrained model (empty str to train from scratch)
-  model_save_path: "model.pth"            # Filename inside output_dir (or local path when output_dir is empty)
-  epochs: 10                               # Upper bound — early stopping will halt before this if val_loss stagnates
-  train_val_split: 0.9                     # Proportion of data to use for training (the rest is used for validation)
-  eval_freq: 500                           # Evaluate every N training steps
-  eval_iter: 20                            # Batches used per evaluation
-  patience: 3                              # Early stopping: stop if val_loss hasn't improved for this many eval steps
+  from_pretrained: ""                      # Path to checkpoint, or empty for fresh start
+  model_save_path: "model.pth"             # Saved as output_dir/model.pth
+  epochs: 100                               # Upper bound — early stopping may halt sooner
+  train_val_split: 0.9                     # Fraction of tokens used for training
+  eval_freq: 50                            # Evaluate every N training steps
+  eval_iter: 20                            # Batches used per evaluation pass
+  patience: 3                              # Early stopping patience (eval steps)
 
 
 llm_gen:
-  max_gen_length: 50                       # Maximum length of generated sequences
-  temperature: 1.0                         # Sampling temperature (higher values lead to more random outputs)
-  top_k: 50                                # Top-k sampling (0 to disable)
+  max_gen_length: 50                       # Tokens to generate per sample
+  temperature: 1.0                         # Sampling temperature
+  top_k: 50                                # Top-k filtering (0 to disable)

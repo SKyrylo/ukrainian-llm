@@ -2,8 +2,10 @@
 __pycache__/
 
 dataset/
-models/*.pth
+models/*
 
 *.pdf
 .vscode/
 vocab_analysis.py
+
+*.zip
