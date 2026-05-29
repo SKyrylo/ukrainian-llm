@@ -393,6 +393,14 @@ def main(
             weight_decay=config.optimizer['weight_decay']
         )
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # Optimizer state tensors are loaded onto CPU by default regardless of
+        # where the checkpoint was saved.  Move them to the target device so
+        # they match the model parameters (otherwise AdamW step() crashes with
+        # "Expected all tensors to be on the same device").
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
     else:
         # Fresh start: create a model with randomly initialised weights
         logger.info("Initializing a new model with configuration: %s", MODEL_CONFIG)

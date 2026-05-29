@@ -1,4 +1,4 @@
-dataset_dir: "/kaggle/input/datasets/skyrylo/llm-training-dataset-v6/dataset"
+dataset_dir: "/kaggle/input/datasets/skyrylo/llm-training-dataset-v7/dataset"
 
 # All files produced during this run (tokenizer, token cache, checkpoints,
 # loss plot) are written under output_dir.
@@ -24,7 +24,7 @@ tokenizer:
   # Leave empty to train a new tokenizer on the current corpus and save it to
   # output_dir/tok_save_path.  Set to an absolute path to load an existing one.
   # Colab:  "/content/drive/MyDrive/llm/tokenizer.json"
-  tok_load_from: "/kaggle/input/datasets/skyrylo/llm-training-dataset-v6/models/tokenizer.json"
+  tok_load_from: "/kaggle/input/datasets/skyrylo/llm-training-dataset-v7/models/tokenizer.json"
   tok_save_path: "tokenizer.json"          # Saved as output_dir/tokenizer.json
   vocab_size: 32000                        # Target vocabulary size
   min_freq: null                           # null to train until vocab_size is reached
@@ -55,13 +55,13 @@ llm_init:
 
 
 llm_train:
-  from_pretrained: ""                      # Path to checkpoint, or empty for fresh start
+  from_pretrained: "/kaggle/working/model.pth"  # Path to checkpoint, or empty for fresh start
   model_save_path: "model.pth"             # Saved as output_dir/model.pth
   epochs: 100                               # Upper bound — early stopping may halt sooner
   train_val_split: 0.9                     # Fraction of tokens used for training
   eval_freq: 50                            # Evaluate every N training steps
   eval_iter: 20                            # Batches used per evaluation pass
-  patience: 3                              # Early stopping patience (eval steps)
+  patience: 20                             # Early stopping patience (eval steps)
 
 
 llm_gen:
